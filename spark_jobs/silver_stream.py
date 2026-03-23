@@ -8,8 +8,20 @@ from pyspark.sql.functions import (
     sha2, concat_ws, coalesce
 )
 
+from config import (
+    BRONZE_EVENTS_PATH,
+    SILVER_EVENTS_PATH,
+    SILVER_BAD_RECORDS_PATH,
+    CHECKPOINT_SILVER,
+    CHECKPOINT_SILVER_BAD,
+    TRIGGER_INTERVAL,
+    SHUFFLE_PARTITIONS,
+    MAX_FILES_PER_TRIGGER
+)
+
 spark = SparkSession.builder.appName("SilverLayerStreaming").getOrCreate()
 spark.sparkContext.setLogLevel("WARN")
+# spark.conf.set("spark.sql.shuffle.partitions", str(SHUFFLE_PARTITIONS))
 
 RUN_ID = str(uuid.uuid4())
 PIPELINE_VERSION = "v1.0"
@@ -19,16 +31,16 @@ print("Reading from: bronze/events")
 print("Writing to:  silver/events")
 
 # ---- Infer Schema from Bronze (one-time batch read) ----
-schema = spark.read.format("parquet").load("bronze/events").schema
+schema = spark.read.format("parquet").load(BRONZE_EVENTS_PATH).schema
 
 # ---- Read Bronze as Stream with Schema ----
 bronze_df = (
     spark.readStream
     .format("parquet")
-    .option("maxFilesPerTrigger", 50)
+    .option("maxFilesPerTrigger", MAX_FILES_PER_TRIGGER)
     .option("mergeSchema", "true")
     .schema(schema)
-    .load("bronze/events")
+    .load(BRONZE_EVENTS_PATH)
 )
 
 # ---- Standardize + Enrich (2) + (5) + (6) ----
@@ -102,10 +114,11 @@ deduped_df = (
 silver_query = (
     deduped_df.writeStream
     .format("parquet")
-    .option("checkpointLocation", "checkpoints/silver")
+    .option("checkpointLocation", CHECKPOINT_SILVER)
     .outputMode("append")
-    .trigger(processingTime="10 seconds")
-    .start("silver/events")
+    .trigger(processingTime=TRIGGER_INTERVAL)
+    .partitionBy("event_date")               # ✅ added this? Why : 
+    .start(SILVER_EVENTS_PATH)
 )
 
 import time
@@ -116,10 +129,11 @@ print("Silver lastProgress:", silver_query.lastProgress)
 bad_query = (
     invalid_df.writeStream
     .format("parquet")
-    .option("checkpointLocation", "checkpoints/silver_bad")
+    .option("checkpointLocation", CHECKPOINT_SILVER_BAD)
     .outputMode("append")
+    .trigger(processingTime=TRIGGER_INTERVAL)   # ✅ add this
     .partitionBy("ingest_date")  # optional
-    .start("silver/bad_records")
+    .start(SILVER_BAD_RECORDS_PATH)
 )
 
 spark.streams.awaitAnyTermination()

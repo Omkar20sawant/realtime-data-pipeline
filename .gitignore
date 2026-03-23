@@ -1,3 +1,19 @@
+# Data / outputs
+gold_v2/
+silver/
+bronze/
+checkpoints/
+
+# Parquet
+*.parquet
+*.crc
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
 # Python
 __pycache__/
 *.pyc
