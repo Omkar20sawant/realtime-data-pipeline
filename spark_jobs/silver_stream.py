@@ -21,7 +21,7 @@ from config import (
 
 spark = SparkSession.builder.appName("SilverLayerStreaming").getOrCreate()
 spark.sparkContext.setLogLevel("WARN")
-# spark.conf.set("spark.sql.shuffle.partitions", str(SHUFFLE_PARTITIONS))
+spark.conf.set("spark.sql.shuffle.partitions", str(SHUFFLE_PARTITIONS))
 
 RUN_ID = str(uuid.uuid4())
 PIPELINE_VERSION = "v1.0"
@@ -38,7 +38,7 @@ bronze_df = (
     spark.readStream
     .format("parquet")
     .option("maxFilesPerTrigger", MAX_FILES_PER_TRIGGER)
-    .option("mergeSchema", "true")
+    # .option("mergeSchema", "true")  # .option("ignoreChanges", "true")  # optional: ignore schema changes after start
     .schema(schema)
     .load(BRONZE_EVENTS_PATH)
 )
