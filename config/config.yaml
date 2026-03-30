@@ -1,0 +1,9 @@
+paths: 
+  gold_metrics: gold_v2/pipeline_metrics_per_minute/**/*.parquet
+
+dashboard:
+  default_window_days: 1
+  refresh_interval_ms: 5000
+
+pipeline:
+  app_name: realtine-data-pipeline

@@ -2,93 +2,84 @@ import duckdb
 import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
+import yaml
+import os
+import logging
+from dashboard.config_loader import load_config
+from dashboard.queries import latest_kpi_query, trend_query, recent_rows_query
+from dashboard.utils import get_freshness_status, get_latency_status
 
-### PAGE CONFIF ###
+config = load_config()
+
+METRICS_PATH = config["metrics_path"]
+DEFAULT_WINDOW_DAYS = config["default_window_days"]
+REFRESH_INTERVAL_MS = config["refresh_interval_ms"]
+
+logging.basicConfig(
+    level = logging.INFO,
+    format = "%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("pipeline_dashboard")
+
+logger.info("Dashboard starting")
+logger.info(f"METRICS_PATH={METRICS_PATH}")
+logger.info(f"DEFAULT_WINDOW_DAYS={DEFAULT_WINDOW_DAYS}")
+logger.info(f"REFRESH_INTERVAL_MS={REFRESH_INTERVAL_MS}")
+
+### PAGE CONFIG ###
 
 st.set_page_config(
     page_title = "Pipeline Monitoring Dashboard",
     layout = "wide")
 
-st_autorefresh(interval=5 * 1000, key="pipeline_dashboard_refresh")
+st_autorefresh(interval= REFRESH_INTERVAL_MS, key="pipeline_dashboard_refresh")
 st.title("Real-time Data Pipeline Monitoring Dashboard")
 st.caption("Gold metrics queried with DuckDB and displayed in Streamlit")
 
 st.sidebar.header("Filters")
 
+day_option = [1, 3, 7, 14]
 days = st.sidebar.selectbox(
     "Select Time Window (days)",
-    [1, 3, 7, 14],
-    index=0
+    day_option,
+    index=day_option.index(DEFAULT_WINDOW_DAYS) if DEFAULT_WINDOW_DAYS in day_option else 0
 )
 st.caption(f"Showing data for the last {days} day(s)")
 
 ### DATA SOURCE ###
-METRICS_PATH = "gold_v2/pipeline_metrics_per_minute/**/*.parquet"
+# METRICS_PATH = "gold_v2/pipeline_metrics_per_minute/**/*.parquet"
 
-def run_query(query:str)->pd.DataFrame:
-    """Execute a DUCKDB SQL and return a Pandas DataFrame."""
+def run_query(query_name: str, query: str) -> pd.DataFrame:
+    """Execute a DuckDB SQL query and return a Pandas DataFrame."""
+    logger.info(f"Executing query={query_name}")
     con = duckdb.connect()
     try:
         df = con.execute(query).df()
+        logger.info(f"Query succeeded | query={query_name} rows_returned={len(df)}")
         return df
+    except Exception:
+        logger.exception(f"Query failed | query={query_name}")
+        raise
     finally:
         con.close()
 
-
-### LOAD DATA ###
-latest_kpi_query = f"""
-SELECT 
-Window_start,
-Window_end,
-events_valid_count,
-avg_processing_delay_sec,
-p95_processing_delay_sec,
-latest_event_ts_seen,
-computed_at
-FROM read_parquet('{METRICS_PATH}')
-ORDER BY window_start DESC
-LIMIT 1
-"""
-
-trend_query = f"""
-SELECT 
-Window_start,
-events_valid_count,
-avg_processing_delay_sec,
-p95_processing_delay_sec,
-latest_event_ts_seen,
-computed_at
-FROM read_parquet('{METRICS_PATH}')
-WHERE window_start >= NOW() - INTERVAL '{days} days'
-ORDER BY window_start ASC
-"""
-
-recent_rows_query = f"""
-SELECT
-    window_start,
-    window_end,
-    events_valid_count,
-    avg_processing_delay_sec,
-    p95_processing_delay_sec,
-    latest_event_ts_seen,
-    computed_at
-FROM read_parquet('{METRICS_PATH}')
-WHERE window_start >= NOW() - INTERVAL '{days} days'
-ORDER BY window_start DESC
-LIMIT 100
-"""
-
 try:
-    df_latest = run_query(latest_kpi_query)
-    df_trend = run_query(trend_query)
-    df_recent = run_query(recent_rows_query)
+    logger.info("Loading dashboard datasets")
+    df_latest = run_query("latest_kpi", latest_kpi_query(METRICS_PATH))
+    df_trend = run_query("trend", trend_query(METRICS_PATH, days))
+    df_recent = run_query("recent_rows", recent_rows_query(METRICS_PATH, days))
+    logger.info(
+        f"Datasets loaded successfully | latest={len(df_latest)} trend={len(df_trend)} recent={len(df_recent)}"
+    )
 except Exception as e:
+    logger.exception("Failed to load dashboard datasets")
     st.error(f"Failed to load dashboard dataset: {e}")
     st.stop()
 
 
 ### EMPTY DATA HANDLING ###
 if df_latest.empty:
+    logger.warning("No metrics data found in Gold layer output")
     st.warning("No metrics data found yet. Make sure the Gold pipeline has produced parquet output.")
     st.stop()
 
@@ -107,48 +98,6 @@ timestamp_cols_recent = ["window_start", "window_end", "latest_event_ts_seen", "
 for col in timestamp_cols_recent:
     if col in df_recent.columns:
         df_recent[col] = pd.to_datetime(df_recent[col], errors="coerce")
-
-def get_freshness_status(freshness_gap_sec: int | None) -> str:
-    if freshness_gap_sec is None:
-        return "⚪ Unknown"
-    if freshness_gap_sec < 10:
-        return "🟢 Healthy"
-    elif freshness_gap_sec < 30:
-        return "🟡 Warning"
-    else:
-        return "🔴 Critical"
-
-
-def get_latency_status(p95_delay: float | None) -> str:
-    if p95_delay is None:
-        return "⚪ Unknown"
-    if p95_delay < 500:
-        return "🟢 Healthy"
-    elif p95_delay < 1500:
-        return "🟡 Warning"
-    else:
-        return "🔴 Critical"
-    
-def get_freshness_status(freshness_gap_sec):
-    if freshness_gap_sec is None:
-        return "⚪ Unknown", "unknown"
-    if freshness_gap_sec < 10:
-        return "🟢 Healthy", "normal"
-    elif freshness_gap_sec < 30:
-        return "🟡 Warning", "inverse"
-    else:
-        return "🔴 Critical", "off"
-
-
-def get_latency_status(p95_delay):
-    if p95_delay is None:
-        return "⚪ Unknown", "unknown"
-    if p95_delay < 300:
-        return "🟢 Healthy", "normal"
-    elif p95_delay < 900:
-        return "🟡 Warning", "inverse"
-    else:
-        return "🔴 Critical", "off"
 
 
 ### PREPARE LATEST KPI ROW ###
