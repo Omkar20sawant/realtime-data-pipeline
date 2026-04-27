@@ -212,14 +212,14 @@ Count rows:
 
 ```sql
 SELECT count(*)
-FROM read_parquet('silver/events/**/*.parquet');
+FROM read_parquet('silver/events_v2/**/*.parquet');
 ```
 
 Preview records:
 
 ```sql
 SELECT *
-FROM read_parquet('silver/events/**/*.parquet')
+FROM read_parquet('silver/events_v2/**/*.parquet')
 LIMIT 10;
 ```
 

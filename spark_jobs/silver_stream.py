@@ -22,6 +22,7 @@ from config import (
 spark = SparkSession.builder.appName("SilverLayerStreaming").getOrCreate()
 spark.sparkContext.setLogLevel("WARN")
 spark.conf.set("spark.sql.shuffle.partitions", str(SHUFFLE_PARTITIONS))
+spark.conf.set("spark.sql.session.timeZone", "UTC")
 
 RUN_ID = str(uuid.uuid4())
 PIPELINE_VERSION = "v1.0"

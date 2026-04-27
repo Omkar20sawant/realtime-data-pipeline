@@ -22,6 +22,7 @@ spark = (SparkSession.builder
          .getOrCreate())
 
 spark.sparkContext.setLogLevel("WARN")
+spark.conf.set("spark.sql.session.timeZone", "UTC")
 
 # Read Kafka stream
 raw_df = (

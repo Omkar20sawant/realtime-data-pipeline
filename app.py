@@ -1,61 +1,99 @@
+"""
+Real-time Data Pipeline Monitoring Dashboard
+─────────────────────────────────────────────
+Changes from previous version:
+  1. Sidebar date-range picker (replaces "last N days" selector).
+     Dates shown in PST; converted to UTC for Parquet queries so
+     partition pruning still works.
+  2. All displayed timestamps converted to PST (America/Los_Angeles).
+  3. New "Run History" tab — detects distinct pipeline sessions per day
+     and shows start/end (PST), duration, events processed, and health.
+"""
+
+import logging
+
 import duckdb
 import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
-import yaml
-import os
-import logging
+
 from dashboard.config_loader import load_config
-from dashboard.queries import latest_kpi_query, trend_query, recent_rows_query
-from dashboard.utils import get_freshness_status, get_latency_status
+from dashboard.queries import (
+    latest_kpi_query,
+    trend_query,
+    recent_rows_query,
+    run_sessions_query,
+)
+from dashboard.utils import (
+    to_pst,
+    fmt_pst,
+    get_freshness_status,
+    get_latency_status,
+)
 
+# ── Config ────────────────────────────────────────────────────────────────────
 config = load_config()
-
-METRICS_PATH = config["metrics_path"]
-DEFAULT_WINDOW_DAYS = config["default_window_days"]
-REFRESH_INTERVAL_MS = config["refresh_interval_ms"]
+METRICS_PATH      = config["metrics_path"]
+REFRESH_INTERVAL  = config["refresh_interval_ms"]
 
 logging.basicConfig(
-    level = logging.INFO,
-    format = "%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("pipeline_dashboard")
-
 logger.info("Dashboard starting")
 logger.info(f"METRICS_PATH={METRICS_PATH}")
-logger.info(f"DEFAULT_WINDOW_DAYS={DEFAULT_WINDOW_DAYS}")
-logger.info(f"REFRESH_INTERVAL_MS={REFRESH_INTERVAL_MS}")
 
-### PAGE CONFIG ###
+PST_TZ = "America/Los_Angeles"
 
-st.set_page_config(
-    page_title = "Pipeline Monitoring Dashboard",
-    layout = "wide")
+# ── Page setup ────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Pipeline Monitoring Dashboard", layout="wide")
+st_autorefresh(interval=REFRESH_INTERVAL, key="pipeline_dashboard_refresh")
 
-st_autorefresh(interval= REFRESH_INTERVAL_MS, key="pipeline_dashboard_refresh")
 st.title("Real-time Data Pipeline Monitoring Dashboard")
-st.caption("Gold metrics queried with DuckDB and displayed in Streamlit")
+st.caption("Gold metrics queried with DuckDB and displayed in Streamlit — times shown in PST")
 
+# ── Sidebar: date-range picker (PST) ─────────────────────────────────────────
 st.sidebar.header("Filters")
 
-day_option = [1, 3, 7, 14]
-days = st.sidebar.selectbox(
-    "Select Time Window (days)",
-    day_option,
-    index=day_option.index(DEFAULT_WINDOW_DAYS) if DEFAULT_WINDOW_DAYS in day_option else 0
+# Default: today in PST
+today_pst = pd.Timestamp.now(tz=PST_TZ).date()
+default_start = today_pst - pd.Timedelta(days=1)
+
+date_range = st.sidebar.date_input(
+    "Select date range (PST)",
+    value=(default_start, today_pst),
+    min_value=today_pst - pd.Timedelta(days=90),
+    max_value=today_pst,
+    help="Pick a start and end date. Times are in PST (America/Los_Angeles).",
 )
-st.caption(f"Showing data for the last {days} day(s)")
 
-### DATA SOURCE ###
-# METRICS_PATH = "gold_v2/pipeline_metrics_per_minute/**/*.parquet"
+# Guard: user may click only one date while picking
+if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+    pst_start_date, pst_end_date = date_range
+else:
+    pst_start_date = pst_end_date = date_range if not isinstance(date_range, (list, tuple)) else date_range[0]
 
+# Convert PST midnight → UTC for Parquet queries
+#   PST start of day  →  UTC  (e.g. 2026-04-24 00:00 PST = 2026-04-24 08:00 UTC)
+#   PST end of day +1 →  UTC  (exclusive upper bound)
+pst_start_ts  = pd.Timestamp(pst_start_date).tz_localize(PST_TZ)
+pst_end_ts    = pd.Timestamp(pst_end_date).tz_localize(PST_TZ) + pd.Timedelta(days=1)
+
+utc_start_str = pst_start_ts.tz_convert("UTC").strftime("%Y-%m-%d %H:%M:%S")
+utc_end_str   = pst_end_ts.tz_convert("UTC").strftime("%Y-%m-%d %H:%M:%S")
+
+st.caption(
+    f"Showing data from **{pst_start_date}** to **{pst_end_date}** (PST)"
+)
+
+# ── Query helper ──────────────────────────────────────────────────────────────
 def run_query(query_name: str, query: str) -> pd.DataFrame:
-    """Execute a DuckDB SQL query and return a Pandas DataFrame."""
     logger.info(f"Executing query={query_name}")
     con = duckdb.connect()
     try:
         df = con.execute(query).df()
-        logger.info(f"Query succeeded | query={query_name} rows_returned={len(df)}")
+        logger.info(f"Query succeeded | query={query_name} rows={len(df)}")
         return df
     except Exception:
         logger.exception(f"Query failed | query={query_name}")
@@ -63,122 +101,202 @@ def run_query(query_name: str, query: str) -> pd.DataFrame:
     finally:
         con.close()
 
+
+# ── Load data ─────────────────────────────────────────────────────────────────
 try:
-    logger.info("Loading dashboard datasets")
-    df_latest = run_query("latest_kpi", latest_kpi_query(METRICS_PATH))
-    df_trend = run_query("trend", trend_query(METRICS_PATH, days))
-    df_recent = run_query("recent_rows", recent_rows_query(METRICS_PATH, days))
-    logger.info(
-        f"Datasets loaded successfully | latest={len(df_latest)} trend={len(df_trend)} recent={len(df_recent)}"
-    )
+    df_latest   = run_query("latest_kpi",    latest_kpi_query(METRICS_PATH))
+    df_trend    = run_query("trend",         trend_query(METRICS_PATH, utc_start_str, utc_end_str))
+    df_recent   = run_query("recent_rows",   recent_rows_query(METRICS_PATH, utc_start_str, utc_end_str))
+    df_sessions = run_query("run_sessions",  run_sessions_query(METRICS_PATH, utc_start_str, utc_end_str))
 except Exception as e:
-    logger.exception("Failed to load dashboard datasets")
-    st.error(f"Failed to load dashboard dataset: {e}")
+    st.error(f"Failed to load dashboard datasets: {e}")
     st.stop()
 
-
-### EMPTY DATA HANDLING ###
 if df_latest.empty:
-    logger.warning("No metrics data found in Gold layer output")
-    st.warning("No metrics data found yet. Make sure the Gold pipeline has produced parquet output.")
+    st.warning("No metrics data found yet. Make sure the Gold pipeline has produced Parquet output.")
     st.stop()
 
-### TYPE CLEANUP ###
-timestamp_cols_latest = ["window_start", "window_end", "latest_event_ts_seen", "computed_at"]
-for col in timestamp_cols_latest:
-    if col in df_latest.columns:
-        df_latest[col] = pd.to_datetime(df_latest[col], errors='coerce')
+# ── Timestamp cleanup + PST conversion ───────────────────────────────────────
+TS_COLS_LATEST  = ["window_start", "window_end", "latest_event_ts_seen", "computed_at"]
+TS_COLS_TREND   = ["window_start", "latest_event_ts_seen", "computed_at"]
+TS_COLS_RECENT  = ["window_start", "window_end", "latest_event_ts_seen", "computed_at"]
+TS_COLS_SESSION = ["session_start_utc", "session_end_utc"]
 
-timestamp_cols_trend = ["window_start", "latest_event_ts_seen", "computed_at"]
-for col in timestamp_cols_trend:
-    if col in df_trend.columns:
-        df_trend[col] = pd.to_datetime(df_trend[col], errors='coerce')      
+for col_name in TS_COLS_LATEST:
+    if col_name in df_latest.columns:
+        df_latest[col_name] = pd.to_datetime(df_latest[col_name], errors="coerce")
 
-timestamp_cols_recent = ["window_start", "window_end", "latest_event_ts_seen", "computed_at"]
-for col in timestamp_cols_recent:
-    if col in df_recent.columns:
-        df_recent[col] = pd.to_datetime(df_recent[col], errors="coerce")
+for col_name in TS_COLS_TREND:
+    if col_name in df_trend.columns:
+        df_trend[col_name] = pd.to_datetime(df_trend[col_name], errors="coerce")
 
+for col_name in TS_COLS_RECENT:
+    if col_name in df_recent.columns:
+        df_recent[col_name] = pd.to_datetime(df_recent[col_name], errors="coerce")
 
-### PREPARE LATEST KPI ROW ###
+for col_name in TS_COLS_SESSION:
+    if col_name in df_sessions.columns:
+        df_sessions[col_name] = pd.to_datetime(df_sessions[col_name], errors="coerce")
+
+# ── KPI values ────────────────────────────────────────────────────────────────
 latest_row = df_latest.iloc[0]
 
 freshness_gap_sec = None
 if pd.notnull(latest_row["latest_event_ts_seen"]):
+    latest_ts = latest_row["latest_event_ts_seen"]
+    if getattr(latest_ts, "tzinfo", None) is None:
+        latest_ts = latest_ts.tz_localize("UTC")
     freshness_gap_sec = max(
         0,
-        int((pd.Timestamp.now() - latest_row["latest_event_ts_seen"]).total_seconds())
+        int((pd.Timestamp.now(tz="UTC") - latest_ts).total_seconds()),
     )
-events_per_min = int(latest_row["events_valid_count"]) if pd.notnull(latest_row["events_valid_count"]) else 0
-avg_delay = float(latest_row["avg_processing_delay_sec"]) if pd.notnull(latest_row["avg_processing_delay_sec"]) else 0.0
-p95_delay = float(latest_row["p95_processing_delay_sec"]) if pd.notnull(latest_row["p95_processing_delay_sec"]) else 0.0
-freshness_status = get_freshness_status(freshness_gap_sec)
-latency_status = get_latency_status(p95_delay)
 
-status_col1, status_col2 = st.columns(2)
-status_col1.markdown(f"**Freshness Status:** {freshness_status}")
-status_col2.markdown(f"**Latency Status:** {latency_status}")
+events_per_min  = int(latest_row["events_valid_count"])   if pd.notnull(latest_row["events_valid_count"])   else 0
+avg_delay       = float(latest_row["avg_processing_delay_sec"]) if pd.notnull(latest_row["avg_processing_delay_sec"]) else 0.0
+p95_delay       = float(latest_row["p95_processing_delay_sec"]) if pd.notnull(latest_row["p95_processing_delay_sec"]) else 0.0
 
 freshness_status, freshness_delta_color = get_freshness_status(freshness_gap_sec)
-latency_status, latency_delta_color = get_latency_status(p95_delay)
+latency_status,  latency_delta_color    = get_latency_status(p95_delay)
 
-### KPI SECTION ###
+# ── Status bar ────────────────────────────────────────────────────────────────
+scol1, scol2 = st.columns(2)
+scol1.markdown(f"**Freshness Status:** {freshness_status}")
+scol2.markdown(f"**Latency Status:** {latency_status}")
 
+# ── Top KPI strip ─────────────────────────────────────────────────────────────
 st.subheader("Latest KPI Metrics")
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Events / min",      f"{events_per_min:,}")
+k2.metric("Avg Delay (sec)",   f"{avg_delay:.2f}")
+k3.metric("P95 Delay (sec)",   f"{p95_delay:.2f}",
+          delta=latency_status,  delta_color=latency_delta_color)
+k4.metric("Freshness Gap (sec)", str(freshness_gap_sec) if freshness_gap_sec is not None else "—",
+          delta=freshness_status, delta_color=freshness_delta_color)
 
-col1, col2, col3, col4 = st.columns(4)
-
-col1.metric("Events/min", f"{events_per_min:,}")
-col2.metric("Avg Delay (sec)", f"{avg_delay:.2f}")
-col3.metric("P95 Delay (sec)", f"{p95_delay:.2f}", delta=latency_status, delta_color=latency_delta_color)
-col4.metric("Freshness Gap (sec)", f"{freshness_gap_sec}", delta=freshness_status, delta_color=freshness_delta_color)
-
-
-
-### TREND DATA PREPARATION ###
+# ── Trend data prep ───────────────────────────────────────────────────────────
 df_trend = df_trend.sort_values("window_start")
 
-events_chart_df = df_trend[["window_start", "events_valid_count"]].copy()
-events_chart_df = events_chart_df.set_index("window_start")
+# Convert window_start to PST for chart axis labels
+if not df_trend.empty:
+    df_trend["window_start_pst"] = to_pst(df_trend["window_start"])
+    events_chart_df  = df_trend.set_index("window_start_pst")[["events_valid_count"]]
+    latency_chart_df = df_trend.set_index("window_start_pst")[
+        ["avg_processing_delay_sec", "p95_processing_delay_sec"]
+    ]
+else:
+    events_chart_df  = pd.DataFrame()
+    latency_chart_df = pd.DataFrame()
 
-latency_chart_df = df_trend[["window_start", "avg_processing_delay_sec", "p95_processing_delay_sec"]].copy()
-latency_chart_df = latency_chart_df.set_index("window_start")
+# ── Build PST-display version of recent rows ──────────────────────────────────
+df_recent_display = df_recent.copy()
+for col_name in TS_COLS_RECENT:
+    if col_name in df_recent_display.columns:
+        df_recent_display[col_name] = fmt_pst(df_recent_display[col_name])
 
-tab1, tab2, tab3 = st.tabs(["Overview", "Trends", "Raw Data"])
+# ── Build PST-display version of sessions ────────────────────────────────────
+df_sessions_display = df_sessions.copy()
+if not df_sessions_display.empty:
+    df_sessions_display["session_start_pst"] = fmt_pst(df_sessions_display["session_start_utc"])
+    df_sessions_display["session_end_pst"]   = fmt_pst(df_sessions_display["session_end_utc"])
+    # date column for grouping label
+    df_sessions_display["date_pst"] = to_pst(df_sessions_display["session_start_utc"]).dt.strftime("%Y-%m-%d")
 
-with tab1:
+    sessions_table = df_sessions_display[[
+        "date_pst",
+        "session_start_pst",
+        "session_end_pst",
+        "duration_minutes",
+        "total_events",
+        "avg_delay_sec",
+        "p95_delay_sec",
+        "health",
+    ]].rename(columns={
+        "date_pst":          "Date (PST)",
+        "session_start_pst": "Run Start (PST)",
+        "session_end_pst":   "Run End (PST)",
+        "duration_minutes":  "Duration (min)",
+        "total_events":      "Total Events",
+        "avg_delay_sec":     "Avg Delay (sec)",
+        "p95_delay_sec":     "P95 Delay (sec)",
+        "health":            "Health",
+    })
+
+# ── Tabs ──────────────────────────────────────────────────────────────────────
+tab_overview, tab_trends, tab_raw, tab_runs = st.tabs(
+    ["Overview", "Trends", "Raw Data", "Run History"]
+)
+
+# ── Tab 1: Overview ───────────────────────────────────────────────────────────
+with tab_overview:
     st.subheader("Pipeline Overview")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("Events / min",        f"{events_per_min:,}")
+        st.metric("Freshness Gap (sec)", str(freshness_gap_sec) if freshness_gap_sec is not None else "—",
+                  delta=freshness_status, delta_color=freshness_delta_color)
+    with c2:
+        st.metric("Avg Delay (sec)",  f"{avg_delay:.2f}")
+        st.metric("P95 Delay (sec)", f"{p95_delay:.2f}",
+                  delta=latency_status, delta_color=latency_delta_color)
 
-    col1, col2 = st.columns(2)
+# ── Tab 2: Trends ─────────────────────────────────────────────────────────────
+with tab_trends:
+    st.subheader("Events per Minute Trend (PST)")
+    if events_chart_df.empty:
+        st.info("No trend data for the selected date range.")
+    else:
+        st.line_chart(events_chart_df)
 
-    with col1:
-        st.metric("Events/min", f"{events_per_min:,}")
-        st.metric("Freshness Gap (sec)", f"{freshness_gap_sec}", delta=freshness_status, delta_color=freshness_delta_color)
+    st.subheader("Processing Delay Trend (PST)")
+    if latency_chart_df.empty:
+        st.info("No latency data for the selected date range.")
+    else:
+        st.line_chart(latency_chart_df)
 
-    with col2:
-        st.metric("Avg Delay (sec)", f"{avg_delay:.2f}")
-        st.metric("P95 Delay (sec)", f"{p95_delay:.2f}", delta=latency_status, delta_color=latency_delta_color)
+# ── Tab 3: Raw Data ───────────────────────────────────────────────────────────
+with tab_raw:
+    st.subheader("Recent Metrics Records (times in PST)")
+    if df_recent_display.empty:
+        st.info("No records for the selected date range.")
+    else:
+        st.dataframe(df_recent_display, use_container_width=True)
 
-with tab2:
-    st.subheader("Events per Minute Trend")
-    st.line_chart(events_chart_df)
+# ── Tab 4: Run History ────────────────────────────────────────────────────────
+with tab_runs:
+    st.subheader("Pipeline Run History (PST)")
+    st.caption(
+        "Each row is one continuous pipeline run. A new run is detected when "
+        "there is a gap of more than 5 minutes between consecutive 1-minute windows."
+    )
 
-    st.subheader("Processing Delay Trend")
-    st.line_chart(latency_chart_df)
+    if df_sessions_display.empty:
+        st.info("No run sessions found for the selected date range.")
+    else:
+        st.dataframe(sessions_table, use_container_width=True)
 
-with tab3:
-    st.subheader("Recent Metrics Records")
-    st.dataframe(df_recent, use_container_width=True)
+        # Summary: total run time per day
+        st.subheader("Total Pipeline Time per Day (PST)")
+        daily = (
+            sessions_table
+            .groupby("Date (PST)")["Duration (min)"]
+            .sum()
+            .reset_index()
+            .rename(columns={"Duration (min)": "Total Run Time (min)"})
+            .sort_values("Date (PST)", ascending=False)
+        )
+        daily["Total Run Time (hrs)"] = (daily["Total Run Time (min)"] / 60).round(2)
+        st.dataframe(daily, use_container_width=True)
 
+# ── Footer ────────────────────────────────────────────────────────────────────
 st.divider()
-
-### FOOTER / CONTEXT ###
 st.markdown(
     """
 **How to read this dashboard**
-- **Events / min** shows throughput for the latest 1-minute window.
-- **Avg Delay / P95 Delay** shows processing latency.
-- **Freshness Gap** shows how far behind the latest event is from current time.
-- The table below helps inspect the actual latest metric records.
+- **Events / min** — throughput for the latest 1-minute processing window.
+- **Avg Delay / P95 Delay** — processing latency (seconds from event time to ingest time).
+- **Freshness Gap** — how many seconds behind the latest seen event is relative to now.
+- **Run History** — each row is a distinct pipeline session; multiple rows on the same date
+  mean the pipeline was started, stopped, and restarted that day.
+- All times displayed in **PST (America/Los_Angeles)**.
 """
 )
