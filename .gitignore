@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# Conda
+.env
+.conda/
+
+# Spark / streaming outputs
+data/raw_events/
+bronze/events/
+bronze/checkpoints/
+
+# Parquet files
+*.parquet
+
+# OS files
+.DS_Store
