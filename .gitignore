@@ -6,6 +6,30 @@ __pycache__/
 .env
 .conda/
 
+# Spark / streaming outputs (root-level)
+bronze/
+silver/
+gold/
+checkpoints/
+
+# Generated raw data
+data_generator/data/
+
+# Parquet files
+*.parquet
+
+# CSV exports
+*.csv
+
+# OS files
+.DS_Store# Python
+__pycache__/
+*.pyc
+
+# Conda
+.env
+.conda/
+
 # Spark / streaming outputs
 data/raw_events/
 bronze/events/
