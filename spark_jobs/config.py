@@ -26,8 +26,8 @@ BRONZE_EVENTS_PATH = env("BRONZE_EVENTS_PATH", "bronze/events")
 # CP_PCT = env("CP_PCT", "checkpoints/gold_latency_percentiles")
 
 # ---- Streaming knobs ----
-TRIGGER_INTERVAL = env("TRIGGER_INTERVAL", "20 seconds")  # e.g. "2 seconds", "10 seconds"
-SHUFFLE_PARTITIONS = int(env("SHUFFLE_PARTITIONS", "8"))
+TRIGGER_INTERVAL = env("TRIGGER_INTERVAL", "60 seconds")  # e.g. "2 seconds", "10 seconds"
+SHUFFLE_PARTITIONS = int(env("SHUFFLE_PARTITIONS", "4"))
 
 # ---- Optional: schema evolution & file source behavior ----
 MAX_FILES_PER_TRIGGER = int(env("MAX_FILES_PER_TRIGGER", "30"))
