@@ -31,18 +31,58 @@ print("✅ Silver streaming started.")
 print("Reading from: bronze/events")
 print("Writing to:  silver/events")
 
+
+# ---- Silver contract: columns Silver should always have ----
+EXPECTED_SILVER_COLUMNS = {
+    "event_id": StringType(),
+    "event_ts": TimestampType(),
+    "store_id": IntegerType(),
+    "sku": StringType(),
+    "qty": IntegerType(),
+    "price": DoubleType(),
+    "channel": StringType(),
+    "_ingest_ts": TimestampType(),
+    "_source_file": StringType(), 
+    #fuure_fields:
+    "customer_type": StringType(),  ##Can be a member or a guest login to buy skus
+    "payment_method": StringType()  ##How the customer paid for the order (credit card, cash, Gift Card, Debit card, etc)
+}
+
+def extend_schema(base_schema, expected_cols):
+    merged = StructType(base_schema.fields[:])
+    existing = set(base_schema.fieldNames())
+
+    for col_name, data_type in expected_cols.items():
+        if col_name not in existing:
+            merged.add(StructField(col_name, data_type, True))
+    return merged
+
+def ensure_expected_columns(df, expected_cols):
+    for col_name, data_type in expected_cols.items():
+        if col_name not in df. columns:
+            df = df.withColumn(col_name, lit(None).cast(data_type))
+        else: 
+            df = df.withColumn(col_name, col(col_name).cast(data_type))
+    return df
+
 # ---- Infer Schema from Bronze (one-time batch read) ----
-schema = spark.read.format("parquet").load(BRONZE_EVENTS_PATH).schema
+source_schema = spark.read.format("parquet").load(BRONZE_EVENTS_PATH).schema
+
+# ---- Extend schema with optional/future Silver columns ----
+stream_schema = extend_schema(source_schema, EXPECTED_SILVER_COLUMNS)
 
 # ---- Read Bronze as Stream with Schema ----
 bronze_df = (
     spark.readStream
     .format("parquet")
     .option("maxFilesPerTrigger", MAX_FILES_PER_TRIGGER)
-    # .option("mergeSchema", "true")  # .option("ignoreChanges", "true")  # optional: ignore schema changes after start
-    .schema(schema)
+    .option("mergeSchema", "true")  # .option("ignoreChanges", "true")  # optional: ignore schema changes after start
+    .schema(stream_schema)
     .load(BRONZE_EVENTS_PATH)
 )
+
+#  ---- Make Silver schema-safe ----
+bronze_df = ensure_expected_columns(bronze_df, EXPECTED_SILVER_COLUMNS)
 
 # ---- Standardize + Enrich (2) + (5) + (6) ----
 base_df = (bronze_df
@@ -67,6 +107,15 @@ base_df = (bronze_df
     )
 )
 
+FINAL_COLUMNS = [
+    "event_id", "event_ts", "store_id", "sku", "qty", "price", "channel",
+    "customer_type", "payment_method",
+    "_ingest_ts", "_source_file", "_run_id", "_pipeline_version",
+    "event_date", "ingest_date", "event_hour", "processing_delay_sec", "delay_bucket"
+]
+
+base_df = base_df.select(*FINAL_COLUMNS)
+
 
 condition = (
     (col("event_id").isNotNull()) &
@@ -75,6 +124,7 @@ condition = (
     (col("sku").isNotNull()) &
     (col("qty").isNotNull()) &
     (col("price").isNotNull()) &
+    (col("channel").isNotNull()) &
     (col("price") > 0) &
     (col("qty") > 0) &
     (col("channel").isin("web", "mobile", "store"))

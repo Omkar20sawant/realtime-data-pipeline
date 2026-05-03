@@ -184,10 +184,9 @@ Recommended order:
 7. Streamlit
 
 ---
-
 ### 6. Validate with DuckDB
 
-Use DuckDB to confirm that data is flowing through each layer.
+Use DuckDB to confirm that data is flowing through each layer. Since Parquet files may have mixed schemas across old and new runs, use `union_by_name = true` in all validation queries.
 
 #### Bronze checks
 
@@ -195,15 +194,35 @@ Count rows:
 
 ```sql
 SELECT count(*)
-FROM read_parquet('bronze/events/**/*.parquet');
+FROM read_parquet('bronze/events/**/*.parquet', union_by_name = true);
 ```
 
 Preview records:
 
 ```sql
 SELECT *
-FROM read_parquet('bronze/events/**/*.parquet')
+FROM read_parquet('bronze/events/**/*.parquet', union_by_name = true)
 LIMIT 10;
+```
+
+Preview latest Bronze records:
+
+```sql
+SELECT *
+FROM read_parquet('bronze/events/**/*.parquet', union_by_name = true)
+ORDER BY _ingest_ts DESC
+LIMIT 20;
+```
+
+Check schema-evolution fields:
+
+```sql
+SELECT
+  count(*) AS total_rows,
+  count(customer_type) AS customer_type_rows,
+  count(payment_method) AS payment_method_rows,
+  count(_raw_json) AS raw_json_rows
+FROM read_parquet('bronze/events/**/*.parquet', union_by_name = true);
 ```
 
 #### Silver checks
@@ -212,15 +231,34 @@ Count rows:
 
 ```sql
 SELECT count(*)
-FROM read_parquet('silver/events_v2/**/*.parquet');
+FROM read_parquet('silver/events_v2/**/*.parquet', union_by_name = true);
 ```
 
 Preview records:
 
 ```sql
 SELECT *
-FROM read_parquet('silver/events_v2/**/*.parquet')
+FROM read_parquet('silver/events_v2/**/*.parquet', union_by_name = true)
 LIMIT 10;
+```
+
+Preview latest Silver records:
+
+```sql
+SELECT *
+FROM read_parquet('silver/events_v2/**/*.parquet', union_by_name = true)
+ORDER BY _ingest_ts DESC
+LIMIT 20;
+```
+
+Check new schema fields in Silver:
+
+```sql
+SELECT
+  count(*) AS total_rows,
+  count(customer_type) AS customer_type_rows,
+  count(payment_method) AS payment_method_rows
+FROM read_parquet('silver/events_v2/**/*.parquet', union_by_name = true);
 ```
 
 #### Gold checks
@@ -229,14 +267,14 @@ Count rows for delay buckets:
 
 ```sql
 SELECT count(*)
-FROM read_parquet('gold_v2/delay_buckets_per_minute/**/*.parquet');
+FROM read_parquet('gold_v2/delay_buckets_per_minute/**/*.parquet', union_by_name = true);
 ```
 
 Latest Gold records:
 
 ```sql
 SELECT *
-FROM read_parquet('gold_v2/delay_buckets_per_minute/**/*.parquet')
+FROM read_parquet('gold_v2/delay_buckets_per_minute/**/*.parquet', union_by_name = true)
 ORDER BY window_start DESC
 LIMIT 20;
 ```
@@ -245,17 +283,17 @@ Latest Gold window:
 
 ```sql
 SELECT MAX(window_start) AS latest_window
-FROM read_parquet('gold_v2/delay_buckets_per_minute/**/*.parquet');
+FROM read_parquet('gold_v2/delay_buckets_per_minute/**/*.parquet', union_by_name = true);
 ```
 
 Latest full snapshot for one window:
 
 ```sql
 SELECT *
-FROM read_parquet('gold_v2/delay_buckets_per_minute/**/*.parquet')
+FROM read_parquet('gold_v2/delay_buckets_per_minute/**/*.parquet', union_by_name = true)
 WHERE window_start = (
     SELECT MAX(window_start)
-    FROM read_parquet('gold_v2/delay_buckets_per_minute/**/*.parquet')
+    FROM read_parquet('gold_v2/delay_buckets_per_minute/**/*.parquet', union_by_name = true)
 )
 ORDER BY delay_bucket;
 ```
@@ -264,7 +302,7 @@ ORDER BY delay_bucket;
 
 ```sql
 SELECT count(*)
-FROM read_parquet('gold_v2/**/*.parquet');
+FROM read_parquet('gold_v2/**/*.parquet', union_by_name = true);
 ```
 
 ---
@@ -282,7 +320,6 @@ Open in browser:
 ```text
 http://localhost:8501
 ```
-
 ---
 
 ## Verification Flow

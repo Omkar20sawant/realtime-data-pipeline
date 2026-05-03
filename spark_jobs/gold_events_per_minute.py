@@ -28,15 +28,21 @@ parquet_files = glob.glob(os.path.join(SILVER_EVENTS_PATH, "**", "*.parquet"), r
 if not parquet_files:
     raise RuntimeError(f"No parquet files found in {SILVER_EVENTS_PATH} (recursive). Start Silver first or wait for output.")
 
-silver_schema = spark.read.parquet(parquet_files[0]).schema
-print(f"✅ Inferred schema from: {parquet_files[0]}")
+silver_schema = (
+    spark.read
+    .option("mergeSchema", "true")
+    .parquet(SILVER_EVENTS_PATH)
+    .schema
+)
+print(f"✅ Inferred merged schema from: {SILVER_EVENTS_PATH}")
 
 silver_df = (
     spark.readStream
     .format("parquet")
     .schema(silver_schema)
-    .option("maxFilesPerTrigger", MAX_FILES_PER_TRIGGER)   # start small: 5–20
+    .option("maxFilesPerTrigger", MAX_FILES_PER_TRIGGER)
     .load(SILVER_EVENTS_PATH)
+    .select("event_ts", "delay_bucket", "processing_delay_sec")
 )
 
 # Common watermark
